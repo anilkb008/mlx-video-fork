@@ -5,7 +5,6 @@ import Foundation
 import MLX
 import MLXFast
 import MLXNN
-import MLXRandom
 
 /// Temporal cache depth for causal convolution.
 private let cacheT = 2
@@ -61,15 +60,15 @@ public class CausalConv3d: Module {
     public func callAsFunction(_ x: MLXArray, cacheX: MLXArray? = nil) -> MLXArray {
         let b = x.dim(0), c = x.dim(1), t = x.dim(2), h = x.dim(3), w = x.dim(4)
         var xVar = x
-        var causalPad = causalPadT
+        var currentCausalPad = causalPadT
 
-        if let cache = cacheX, causalPad > 0 {
+        if let cache = cacheX, currentCausalPad > 0 {
             xVar = concatenated([cache, xVar], axis: 2)
-            causalPad = max(0, causalPad - cache.dim(2))
+            currentCausalPad = max(0, currentCausalPad - cache.dim(2))
         }
 
-        if causalPad > 0 {
-            let padT = MLXArray.zeros([b, c, causalPad, h, w]).asType(xVar.dtype)
+        if currentCausalPad > 0 {
+            let padT = MLXArray.zeros([b, c, currentCausalPad, h, w]).asType(xVar.dtype)
             xVar = concatenated([padT, xVar], axis: 2)
         }
 
@@ -81,12 +80,12 @@ public class CausalConv3d: Module {
         }
 
         xVar = xVar.transposed(0, 2, 3, 4, 1)  // [B, T, H, W, C]
-        let out = conv3d(xVar)
+        let out = conv3dImpl(xVar)
         return out.transposed(0, 4, 1, 2, 3)  // [B, O, T', H', W']
     }
 
     /// 3D conv via sliding window + 2D conv per time step.
-    private func conv3d(_ x: MLXArray) -> MLXArray {
+    private func conv3dImpl(_ x: MLXArray) -> MLXArray {
         let b = x.dim(0), t = x.dim(1), h = x.dim(2), w = x.dim(3), cIn = x.dim(4)
         let kt = kernelSize.0, kh = kernelSize.1, kw = kernelSize.2
         let st = stride.0, sh = stride.1, sw = stride.2
@@ -125,6 +124,10 @@ public enum IntOrTriple {
 // MARK: - RMS_norm (VAE)
 
 /// Channel-first L2 normalization matching original Wan VAE.
+///
+/// Uses L2 normalize along channel dim with learned scale, equivalent to RMS norm.
+/// `images=true`: gamma shape (dim, 1, 1) for 4D (per-frame) input.
+/// `images=false`: gamma shape (dim, 1, 1, 1) for 5D video input.
 public class VaeRMSNorm: Module, UnaryLayer {
     let channelFirst: Bool
     let scale: Float
@@ -147,8 +150,8 @@ public class VaeRMSNorm: Module, UnaryLayer {
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
         let normDim = channelFirst ? 1 : -1
         // L2 normalize along channel dim (matches F.normalize)
-        let norm = sqrt(clip(sum(x * x, axis: normDim, keepDims: true), min: 1e-12))
-        return (x / norm) * scale * gamma
+        let normVal = sqrt(clip(sum(x * x, axis: normDim, keepDims: true), min: 1e-12))
+        return (x / normVal) * scale * gamma
     }
 }
 
@@ -156,9 +159,8 @@ public class VaeRMSNorm: Module, UnaryLayer {
 
 /// Residual block with causal 3D convolutions.
 ///
-/// Uses list-based storage to match original PyTorch nn.Sequential key hierarchy:
-/// residual[0]=norm, [1]=SiLU(no params), [2]=conv, [3]=norm, [4]=SiLU, [5]=Dropout, [6]=conv.
-/// Weight keys: residual.0.gamma, residual.2.weight, residual.3.gamma, residual.6.weight, etc.
+/// Structure matches original PyTorch nn.Sequential key hierarchy:
+/// residual[0]=norm, [1]=SiLU, [2]=conv, [3]=norm, [4]=SiLU, [5]=Dropout, [6]=conv.
 public class ResidualBlock: Module {
     /// Norm at index 0
     let norm0: VaeRMSNorm
@@ -194,14 +196,14 @@ public class ResidualBlock: Module {
 
 /// Single-head spatial self-attention for VAE.
 public class VaeAttentionBlock: Module {
-    @ModuleInfo public var norm: VaeRMSNorm
-    @ModuleInfo public var toQkv: Conv2d
-    @ModuleInfo public var proj: Conv2d
+    let norm: VaeRMSNorm
+    let toQkv: Conv2d
+    let proj: Conv2d
 
     public init(dim: Int) {
-        self._norm.wrappedValue = VaeRMSNorm(dim: dim, channelFirst: true, images: true)
-        self._toQkv.wrappedValue = Conv2d(inputChannels: dim, outputChannels: dim * 3, kernelSize: 1)
-        self._proj.wrappedValue = Conv2d(inputChannels: dim, outputChannels: dim, kernelSize: 1)
+        self.norm = VaeRMSNorm(dim: dim, channelFirst: true, images: true)
+        self.toQkv = Conv2d(inputChannels: dim, outputChannels: dim * 3, kernelSize: 1)
+        self.proj = Conv2d(inputChannels: dim, outputChannels: dim, kernelSize: 1)
     }
 
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
@@ -232,12 +234,14 @@ public class VaeAttentionBlock: Module {
 // MARK: - Resample
 
 /// Resample block supporting upsample and downsample modes.
+///
+/// Uses list-based param storage to match original nn.Sequential key hierarchy.
 public class Resample: Module {
     let mode: String
     let dim: Int
 
-    @ModuleInfo public var resample1: Conv2d  // resample[1]
-    @ModuleInfo public var timeConv: CausalConv3d?
+    let resample1: Conv2d   // resample[1]
+    var timeConv: CausalConv3d?
 
     public init(dim: Int, mode: String) {
         precondition(["upsample2d", "upsample3d", "downsample2d", "downsample3d"].contains(mode))
@@ -245,21 +249,21 @@ public class Resample: Module {
         self.dim = dim
 
         if mode.hasPrefix("upsample") {
-            self._resample1.wrappedValue = Conv2d(
+            self.resample1 = Conv2d(
                 inputChannels: dim, outputChannels: dim / 2, kernelSize: 3, padding: 1
             )
             if mode == "upsample3d" {
-                self._timeConv.wrappedValue = CausalConv3d(
+                self.timeConv = CausalConv3d(
                     inChannels: dim, outChannels: dim * 2,
                     kernelSize: .triple(3, 1, 1), padding: .triple(1, 0, 0)
                 )
             }
         } else {
-            self._resample1.wrappedValue = Conv2d(
+            self.resample1 = Conv2d(
                 inputChannels: dim, outputChannels: dim, kernelSize: 3, stride: 2
             )
             if mode == "downsample3d" {
-                self._timeConv.wrappedValue = CausalConv3d(
+                self.timeConv = CausalConv3d(
                     inChannels: dim, outChannels: dim,
                     kernelSize: .triple(3, 1, 1),
                     stride: .triple(2, 1, 1), padding: .triple(0, 0, 0)
@@ -310,12 +314,15 @@ public class Resample: Module {
 // MARK: - Decoder3d
 
 /// 3D VAE Decoder matching Wan2.1 architecture.
+///
+/// Uses flat `middle` and `upsamples` lists to match original
+/// PyTorch nn.Sequential weight key hierarchy.
 public class Decoder3d: Module {
-    @ModuleInfo public var conv1: CausalConv3d
-    @ModuleInfo public var middle: [Module]
-    @ModuleInfo public var upsamples: [Module]
-    public var headNorm: VaeRMSNorm
-    public var headConv: CausalConv3d
+    let conv1: CausalConv3d
+    let middle: [Module]
+    let upsamples: [Module]
+    let headNorm: VaeRMSNorm
+    let headConv: CausalConv3d
 
     public init(
         dim: Int = 96,
@@ -326,12 +333,12 @@ public class Decoder3d: Module {
     ) {
         let dims = [dim * dimMult.last!] + dimMult.reversed().map { dim * $0 }
 
-        self._conv1.wrappedValue = CausalConv3d(
+        self.conv1 = CausalConv3d(
             inChannels: zDim, outChannels: dims[0], kernelSize: .int(3), padding: .int(1)
         )
 
         // Middle: [ResBlock, AttentionBlock, ResBlock]
-        self._middle.wrappedValue = [
+        self.middle = [
             ResidualBlock(inDim: dims[0], outDim: dims[0]),
             VaeAttentionBlock(dim: dims[0]),
             ResidualBlock(inDim: dims[0], outDim: dims[0]),
@@ -351,11 +358,11 @@ public class Decoder3d: Module {
                 currentIn = outD
             }
             if i != dimMult.count - 1 {
-                let mode = temporalUpsample[i] ? "upsample3d" : "upsample2d"
-                upsampleList.append(Resample(dim: outD, mode: mode))
+                let upsampleMode = temporalUpsample[i] ? "upsample3d" : "upsample2d"
+                upsampleList.append(Resample(dim: outD, mode: upsampleMode))
             }
         }
-        self._upsamples.wrappedValue = upsampleList
+        self.upsamples = upsampleList
 
         // Output head
         self.headNorm = VaeRMSNorm(dim: dims.last!, channelFirst: true, images: false)
@@ -392,12 +399,14 @@ public class Decoder3d: Module {
 // MARK: - Encoder3d
 
 /// 3D VAE Encoder matching Wan2.1 architecture.
+///
+/// Mirror of Decoder3d with downsampling instead of upsampling.
 public class Encoder3d: Module {
-    @ModuleInfo public var conv1: CausalConv3d
-    @ModuleInfo public var downsamples: [Module]
-    @ModuleInfo public var middle: [Module]
-    public var headNorm: VaeRMSNorm
-    public var headConv: CausalConv3d
+    let conv1: CausalConv3d
+    let downsamples: [Module]
+    let middle: [Module]
+    let headNorm: VaeRMSNorm
+    let headConv: CausalConv3d
 
     public init(
         dim: Int = 96,
@@ -408,7 +417,7 @@ public class Encoder3d: Module {
     ) {
         let dims = [dim] + dimMult.map { dim * $0 }
 
-        self._conv1.wrappedValue = CausalConv3d(
+        self.conv1 = CausalConv3d(
             inChannels: 3, outChannels: dims[0], kernelSize: .int(3), padding: .int(1)
         )
 
@@ -422,14 +431,14 @@ public class Encoder3d: Module {
                 inD = outD
             }
             if i != dimMult.count - 1 {
-                let mode = temporalDownsample[i] ? "downsample3d" : "downsample2d"
-                downsampleList.append(Resample(dim: outD, mode: mode))
+                let dsMode = temporalDownsample[i] ? "downsample3d" : "downsample2d"
+                downsampleList.append(Resample(dim: outD, mode: dsMode))
             }
         }
-        self._downsamples.wrappedValue = downsampleList
+        self.downsamples = downsampleList
 
         // Middle: [ResBlock, AttentionBlock, ResBlock]
-        self._middle.wrappedValue = [
+        self.middle = [
             ResidualBlock(inDim: dims.last!, outDim: dims.last!),
             VaeAttentionBlock(dim: dims.last!),
             ResidualBlock(inDim: dims.last!, outDim: dims.last!),
@@ -478,10 +487,10 @@ public class WanVAE: Module {
     public let std: MLXArray
     public let invStd: MLXArray
 
-    @ModuleInfo public var conv2: CausalConv3d
-    @ModuleInfo public var decoder: Decoder3d
-    @ModuleInfo public var encoder: Encoder3d?
-    @ModuleInfo public var conv1: CausalConv3d?
+    let conv2: CausalConv3d
+    let decoder: Decoder3d
+    var encoder: Encoder3d?
+    var conv1: CausalConv3d?
 
     public init(zDim: Int = 16, encoder hasEncoder: Bool = false) {
         self.zDim = zDim
@@ -489,14 +498,14 @@ public class WanVAE: Module {
         self.std = MLXArray(vaeStd)
         self.invStd = 1.0 / MLXArray(vaeStd)
 
-        self._conv2.wrappedValue = CausalConv3d(
+        self.conv2 = CausalConv3d(
             inChannels: zDim, outChannels: zDim, kernelSize: .int(1)
         )
-        self._decoder.wrappedValue = Decoder3d(dim: 96, zDim: zDim)
+        self.decoder = Decoder3d(dim: 96, zDim: zDim)
 
         if hasEncoder {
-            self._encoder.wrappedValue = Encoder3d(dim: 96, zDim: zDim * 2)
-            self._conv1.wrappedValue = CausalConv3d(
+            self.encoder = Encoder3d(dim: 96, zDim: zDim * 2)
+            self.conv1 = CausalConv3d(
                 inChannels: zDim * 2, outChannels: zDim * 2, kernelSize: .int(1)
             )
         }
@@ -531,8 +540,8 @@ public class WanVAE: Module {
         let invStdR = invStd.reshaped(1, -1, 1, 1, 1)
         let zDenorm = z / invStdR + meanR
 
-        let x = conv2(zDenorm)
-        let out = decoder(x)
+        let xDecoded = conv2(zDenorm)
+        let out = decoder(xDecoded)
         return clip(out, min: -1, max: 1)
     }
 }
