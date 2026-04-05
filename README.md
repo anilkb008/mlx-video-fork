@@ -1,18 +1,36 @@
 # mlx-video
 
-MLX-Video is the best package for inference and finetuning of Image-Video-Audio generation models on your Mac using MLX.
+MLX-Video is the best package for inference and finetuning of Image-Video-Audio generation models on your Mac using MLX. Available in both **Python** and **Swift**.
 
 ## Installation
 
-### Option 1: Install with pip (requires git):
+### Python
+
+#### Option 1: Install with pip (requires git):
 ```bash
 pip install git+https://github.com/Blaizzy/mlx-video.git
 ```
 
-### Option 2: Install with uv (ultra-fast package manager, optional):
+#### Option 2: Install with uv (ultra-fast package manager, optional):
 ```bash
 uv pip install git+https://github.com/Blaizzy/mlx-video.git
 ```
+
+### Swift
+
+The Swift package is in `MLXVideo/`. Add it as a local dependency in your Xcode project or `Package.swift`:
+
+```swift
+.package(path: "MLXVideo")
+```
+
+Or open the included macOS app directly:
+
+```
+open MLXVideoApp/MLXVideoApp.xcodeproj
+```
+
+See the [Swift MLX Video](#swift-mlx-video) section below for details.
 
 ## Supported Models
 
@@ -37,10 +55,14 @@ uv pip install git+https://github.com/Blaizzy/mlx-video.git
 
 **General**
 - Optimized for Apple Silicon using MLX
+- Available in Python and Swift
+- macOS SwiftUI app with real-time progress tracking
 
 ---
 
-## LTX-2
+## Python
+
+### LTX-2
 
 ### Text-to-Video Generation
 
@@ -181,12 +203,128 @@ python -m mlx_video.wan_2.generate \
 
 ---
 
+## Swift MLX Video
+
+A complete Swift port of the Python MLX Video library, enabling native video generation on macOS using Apple's MLX framework.
+
+### Project Structure
+
+```
+MLXVideo/                          # Swift Package (library)
+├── Package.swift
+└── Sources/MLXVideo/
+    ├── MLXVideo.swift             # Public API and protocols
+    ├── Common/
+    │   ├── Scheduler.swift        # Euler, DPM++2M, UniPC schedulers
+    │   ├── VideoUtils.swift       # Generation params, progress, types
+    │   ├── WeightLoader.swift     # Safetensors loading
+    │   └── ModelConfig.swift      # Base configuration
+    ├── WAN2/
+    │   ├── WanConfig.swift        # Wan2.1/2.2 configurations
+    │   ├── WanModel.swift         # Diffusion transformer backbone
+    │   ├── WanAttention.swift     # Self/cross-attention with QK norm
+    │   ├── WanTransformer.swift   # Transformer block with modulation
+    │   ├── WanRoPE.swift          # 3-way factorized RoPE
+    │   ├── WanVAE.swift           # 3D VAE (4×8×8 compression)
+    │   ├── WanTextEncoder.swift   # T5 encoder (UMT5-XXL)
+    │   └── WanGenerate.swift      # T2V / I2V pipeline
+    └── LTX/
+        ├── LTXConfig.swift        # LTX model configurations
+        ├── LTXModel.swift         # Audio-video transformer
+        ├── LTXAttention.swift     # Multi-head attention with RoPE
+        ├── LTXTransformer.swift   # A/V transformer block
+        ├── LTXAdaLN.swift         # Adaptive layer norm
+        ├── LTXFeedForward.swift   # Gated FFN
+        ├── LTXRoPE.swift          # Interleaved/split/2D RoPE
+        └── LTXGenerate.swift      # Generation pipeline
+
+MLXVideoApp/                       # macOS SwiftUI App
+├── MLXVideoApp.xcodeproj/         # Xcode project (open this)
+└── MLXVideoApp/
+    ├── MLXVideoApp.swift          # App entry point
+    ├── Models/AppState.swift      # Observable state
+    ├── ViewModels/
+    │   └── VideoGeneratorViewModel.swift
+    └── Views/
+        ├── ContentView.swift      # Main UI
+        ├── VideoPlayerView.swift  # Frame playback
+        └── PromptSuggestionsView.swift
+```
+
+### Using the Swift Package
+
+Add `MLXVideo` as a dependency and use the generation pipeline:
+
+```swift
+import MLXVideo
+
+// Create a WAN2 pipeline
+let pipeline = try WanPipeline(modelDirectory: "/path/to/wan2-model")
+try pipeline.loadModels()
+
+// Generate video from text
+let video = try pipeline.generate(
+    prompt: "A cat playing with a ball in a garden",
+    width: 848,
+    height: 480,
+    numFrames: 81,
+    steps: 40,
+    guidanceScale: .single(5.0),
+    seed: 42,
+    schedulerType: .unipc
+)
+
+print("Generated \(video.frameCount) frames at \(video.fps) fps")
+```
+
+### Running the macOS App
+
+1. Open `MLXVideoApp/MLXVideoApp.xcodeproj` in Xcode
+2. Select the **MLXVideoApp** scheme
+3. Build and Run (Cmd+R)
+4. Select a model type (WAN2 T2V, WAN2 I2V, or LTX T2V)
+5. Point to your converted MLX model directory
+6. Enter a prompt and click **Generate Video**
+
+### Requirements (Swift)
+
+- macOS 15.0+ (Sequoia)
+- Xcode 16.2+
+- Apple Silicon Mac
+- [mlx-swift](https://github.com/ml-explore/mlx-swift) 0.21.0+
+
+### Ported Components
+
+| Python Module | Swift Module | Description |
+|---------------|-------------|-------------|
+| `wan_2/wan_2.py` | `WanModel.swift` | Diffusion transformer with patchify/unpatchify |
+| `wan_2/attention.py` | `WanAttention.swift` | Self/cross-attention with QK norm |
+| `wan_2/transformer.py` | `WanTransformer.swift` | Block with 6-param modulation |
+| `wan_2/rope.py` | `WanRoPE.swift` | 3-way factorized RoPE (T/H/W) |
+| `wan_2/vae.py` | `WanVAE.swift` | 3D VAE with CausalConv3d |
+| `wan_2/text_encoder.py` | `WanTextEncoder.swift` | T5 encoder (UMT5-XXL) |
+| `wan_2/scheduler.py` | `Scheduler.swift` | Euler, DPM++2M, UniPC |
+| `wan_2/generate.py` | `WanGenerate.swift` | Full T2V/I2V pipeline |
+| `ltx_2/ltx_2.py` | `LTXModel.swift` | A/V transformer with preprocessors |
+| `ltx_2/transformer.py` | `LTXTransformer.swift` | A/V block with cross-modal attention |
+| `ltx_2/attention.py` | `LTXAttention.swift` | Attention with gate logits |
+| `ltx_2/rope.py` | `LTXRoPE.swift` | Multi-mode RoPE |
+| `ltx_2/generate.py` | `LTXGenerate.swift` | Distilled/dev pipelines |
+
+---
+
 ## Requirements
 
+### Python
 - macOS with Apple Silicon
 - Python >= 3.11
 - MLX >= 0.22.0
 - For weight conversion: PyTorch (`pip install torch`)
+
+### Swift
+- macOS 15.0+ with Apple Silicon
+- Xcode 16.2+
+- mlx-swift 0.21.0+
 
 ## License
 
