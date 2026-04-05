@@ -11,14 +11,14 @@ import MLXRandom
 
 /// Gated feed-forward network with GELU(tanh) activation.
 public class WanFFN: Module, UnaryLayer {
-    @ModuleInfo public var fc1: Linear
-    @ModuleInfo public var fc2: Linear
+    let fc1: Linear
+    let fc2: Linear
     let act: GELU
 
     public init(dim: Int, ffnDim: Int) {
-        self._fc1.wrappedValue = Linear(dim, ffnDim)
+        self.fc1 = Linear(dim, ffnDim)
         self.act = GELU(approximation: .tanh)
-        self._fc2.wrappedValue = Linear(ffnDim, dim)
+        self.fc2 = Linear(ffnDim, dim)
     }
 
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
@@ -31,12 +31,12 @@ public class WanFFN: Module, UnaryLayer {
 
 /// Wan transformer block with learned modulation, self-attn, cross-attn, and FFN.
 public class WanAttentionBlock: Module {
-    @ModuleInfo public var norm1: WanLayerNorm
-    @ModuleInfo public var selfAttn: WanSelfAttention
-    @ModuleInfo public var norm3: WanLayerNorm?
-    @ModuleInfo public var crossAttn: WanCrossAttention
-    @ModuleInfo public var norm2: WanLayerNorm
-    @ModuleInfo public var ffn: WanFFN
+    let norm1: WanLayerNorm
+    let selfAttn: WanSelfAttention
+    let norm3: WanLayerNorm?
+    let crossAttn: WanCrossAttention
+    let norm2: WanLayerNorm
+    let ffn: WanFFN
 
     /// Learned modulation: 6 vectors for scale/shift/gate (kept in float32 for precision).
     public var modulation: MLXArray
@@ -51,22 +51,22 @@ public class WanAttentionBlock: Module {
         eps: Float = 1e-6
     ) {
         // Self-attention
-        self._norm1.wrappedValue = WanLayerNorm(dim: dim, eps: eps)
-        self._selfAttn.wrappedValue = WanSelfAttention(
+        self.norm1 = WanLayerNorm(dim: dim, eps: eps)
+        self.selfAttn = WanSelfAttention(
             dim: dim, numHeads: numHeads, windowSize: windowSize, qkNorm: qkNorm, eps: eps
         )
 
         // Cross-attention (with optional norm on context)
-        self._norm3.wrappedValue = crossAttnNorm
+        self.norm3 = crossAttnNorm
             ? WanLayerNorm(dim: dim, eps: eps, elementwiseAffine: true)
             : nil
-        self._crossAttn.wrappedValue = WanCrossAttention(
+        self.crossAttn = WanCrossAttention(
             dim: dim, numHeads: numHeads, qkNorm: qkNorm, eps: eps
         )
 
         // Feed-forward
-        self._norm2.wrappedValue = WanLayerNorm(dim: dim, eps: eps)
-        self._ffn.wrappedValue = WanFFN(dim: dim, ffnDim: ffnDim)
+        self.norm2 = WanLayerNorm(dim: dim, eps: eps)
+        self.ffn = WanFFN(dim: dim, ffnDim: ffnDim)
 
         // Learned modulation: 6 vectors for scale/shift/gate
         self.modulation = (MLXRandom.normal([1, 6, dim]) * pow(Float(dim), -0.5)).asType(.float32)
