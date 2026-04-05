@@ -1,5 +1,6 @@
 // VideoGeneratorViewModel.swift - Generation logic and model management
 
+import AppKit
 import SwiftUI
 import MLX
 import MLXNN

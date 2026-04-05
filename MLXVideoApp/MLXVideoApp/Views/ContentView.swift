@@ -1,5 +1,6 @@
 // ContentView.swift - Main app layout with macOS 26 features
 
+import AppKit
 import SwiftUI
 
 struct ContentView: View {

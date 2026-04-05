@@ -1,8 +1,9 @@
 // VideoPlayerView.swift - Video playback and frame preview
 // Uses macOS 26 features where available
 
-import SwiftUI
+import AppKit
 import AVKit
+import SwiftUI
 
 // MARK: - Video Player View
 
