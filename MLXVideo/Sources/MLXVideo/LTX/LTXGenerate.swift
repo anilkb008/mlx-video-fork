@@ -366,6 +366,43 @@ public class LTXPipeline {
         self.pipelineType = pipelineType
     }
 
+    /// Create a pipeline from a local model directory.
+    ///
+    /// Automatically handles quantized models (Q4, Q8) by reading the quantization
+    /// config from config.json.
+    ///
+    /// - Parameters:
+    ///   - modelPath: Local path to the model directory
+    ///   - pipelineType: Pipeline type (distilled or dev)
+    public static func fromPretrained(
+        modelPath: String,
+        pipelineType: PipelineType = .distilled
+    ) throws -> LTXPipeline {
+        print("Loading LTX model from: \(modelPath)")
+        let model = try LTXModel.fromPretrained(modelPath: modelPath, strict: false)
+        return LTXPipeline(transformer: model, pipelineType: pipelineType)
+    }
+
+    /// Create a pipeline from a HuggingFace repo ID.
+    ///
+    /// Downloads the model if not cached locally. Supports quantized models.
+    ///
+    /// Example:
+    /// ```swift
+    /// let pipeline = try await LTXPipeline.fromHub("dgrauet/ltx-2.3-mlx-q4")
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - repoId: HuggingFace repo ID (e.g. `dgrauet/ltx-2.3-mlx-q4`)
+    ///   - pipelineType: Pipeline type (distilled or dev)
+    public static func fromHub(
+        _ repoId: String,
+        pipelineType: PipelineType = .distilled
+    ) async throws -> LTXPipeline {
+        let localPath = try await getModelPath(repoId)
+        return try fromPretrained(modelPath: localPath, pipelineType: pipelineType)
+    }
+
     /// Generate video latents from text embeddings.
     ///
     /// - Parameters:

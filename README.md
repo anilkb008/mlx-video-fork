@@ -258,7 +258,33 @@ Add `MLXVideo` as a dependency and use the generation pipeline:
 ```swift
 import MLXVideo
 
-// Create a WAN2 pipeline
+// Load a quantized LTX model from HuggingFace (auto-downloads and caches)
+let pipeline = try await LTXPipeline.fromHub(
+    "dgrauet/ltx-2.3-mlx-q4",
+    pipelineType: .distilled
+)
+
+// Or load from a local directory
+let pipeline = try LTXPipeline.fromPretrained(
+    modelPath: "/path/to/ltx-model",
+    pipelineType: .dev
+)
+
+// Generate video latents
+let latents = pipeline.generateLatents(
+    textEmbeddings: textEmb,
+    numFrames: 9,
+    height: 32,
+    width: 32,
+    numSteps: 8,
+    seed: 42
+)
+```
+
+**WAN2 pipeline:**
+
+```swift
+// Create a WAN2 pipeline from a local directory
 let pipeline = try WanPipeline(modelDirectory: "/path/to/wan2-model")
 try pipeline.loadModels()
 
@@ -273,9 +299,16 @@ let video = try pipeline.generate(
     seed: 42,
     schedulerType: .unipc
 )
-
-print("Generated \(video.frameCount) frames at \(video.fps) fps")
 ```
+
+**Supported quantized models:**
+
+| Model | HuggingFace Repo | Size |
+|-------|-----------------|------|
+| LTX-2.3 Q4 | `dgrauet/ltx-2.3-mlx-q4` | ~5 GB |
+| LTX-2 distilled | `prince-canuma/LTX-2-distilled` | ~19 GB |
+| LTX-2 dev | `prince-canuma/LTX-2-dev` | ~19 GB |
+| LTX-2.3 distilled | `prince-canuma/LTX-2.3-distilled` | ~19 GB |
 
 ### Running the macOS App
 

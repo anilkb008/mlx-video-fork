@@ -441,38 +441,58 @@ public class LTXModel: Module {
         return sanitized
     }
 
-    /// Load model from a pretrained checkpoint directory.
+    /// Load model from a pretrained checkpoint directory or HuggingFace repo ID.
+    ///
+    /// Supports quantized models (e.g. `dgrauet/ltx-2.3-mlx-q4`). When `quantization`
+    /// is present in config.json, Linear layers are replaced with QuantizedLinear before
+    /// loading weights.
+    ///
+    /// - Parameters:
+    ///   - modelPath: Local directory path to the model files
+    ///   - strict: Whether to enforce strict weight loading
+    /// - Returns: Loaded LTXModel ready for inference
     public static func fromPretrained(modelPath: String, strict: Bool = true) throws -> LTXModel {
-        let url = URL(fileURLWithPath: modelPath)
-        let configURL = url.appendingPathComponent("config.json")
-        let configData = try Data(contentsOf: configURL)
-        let config = try JSONDecoder().decode(LTXModelConfig.self, from: configData)
-
+        let config = try loadModelConfig(from: modelPath, type: LTXModelConfig.self)
         let model = LTXModel(config)
 
-        // Load weights from safetensors files
-        var allWeights: [String: MLXArray] = [:]
-        let fm = FileManager.default
-        if let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: nil) {
-            while let fileURL = enumerator.nextObject() as? URL {
-                if fileURL.pathExtension == "safetensors" {
-                    let fileWeights = try MLX.loadArrays(url: fileURL)
-                    for (k, v) in fileWeights {
-                        allWeights[k] = v
-                    }
-                }
-            }
+        // Load all safetensors weights
+        var allWeights = try loadAllWeights(from: modelPath)
+
+        // Sanitize keys (PyTorch -> MLX naming)
+        allWeights = model.sanitize(allWeights)
+
+        // Apply quantization if specified in config.json
+        if let quantConfig = try? readQuantizationConfig(from: modelPath) {
+            print("Applying \(quantConfig.bits)-bit quantization (group_size=\(quantConfig.groupSize))...")
+            applyQuantization(model: model, config: quantConfig, weights: allWeights)
         }
 
-        let sanitized = model.sanitize(allWeights)
-        let converted = sanitized.mapValues { v -> MLXArray in
+        // Cast non-quantized float32 weights to bfloat16
+        // (quantized weights have their own dtypes and should not be cast)
+        let converted = allWeights.mapValues { v -> MLXArray in
             v.dtype == .float32 ? v.asType(.bfloat16) : v
         }
 
-        try model.update(parameters: ModuleParameters.unflattened(converted.map { ($0.key, $0.value) }), verify: strict ? .all : .noUnused)
+        try model.update(
+            parameters: ModuleParameters.unflattened(converted.map { ($0.key, $0.value) }),
+            verify: strict ? .all : .noUnused
+        )
         eval(model.parameters())
 
         return model
+    }
+
+    /// Load model from a HuggingFace repo ID, downloading weights if needed.
+    ///
+    /// Example: `LTXModel.fromHub("dgrauet/ltx-2.3-mlx-q4")`
+    ///
+    /// - Parameters:
+    ///   - repoId: HuggingFace repo ID (e.g. `dgrauet/ltx-2.3-mlx-q4`)
+    ///   - strict: Whether to enforce strict weight loading
+    /// - Returns: Loaded LTXModel ready for inference
+    public static func fromHub(_ repoId: String, strict: Bool = true) async throws -> LTXModel {
+        let localPath = try await getModelPath(repoId)
+        return try fromPretrained(modelPath: localPath, strict: strict)
     }
 }
 
