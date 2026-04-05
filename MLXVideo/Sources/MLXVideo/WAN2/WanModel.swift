@@ -31,16 +31,17 @@ public class Head: Module {
     let outDim: Int
     let patchSize: (Int, Int, Int)
 
-    @ModuleInfo public var norm: WanLayerNorm
-    @ModuleInfo public var head: Linear
+    let norm: WanLayerNorm
+    let head: Linear
+    /// Learned modulation (kept in float32 for precision).
     public var modulation: MLXArray
 
     public init(dim: Int, outDim: Int, patchSize: (Int, Int, Int), eps: Float = 1e-6) {
         self.outDim = outDim
         self.patchSize = patchSize
         let projDim = patchSize.0 * patchSize.1 * patchSize.2 * outDim
-        self._norm.wrappedValue = WanLayerNorm(dim: dim, eps: eps)
-        self._head.wrappedValue = Linear(dim, projDim)
+        self.norm = WanLayerNorm(dim: dim, eps: eps)
+        self.head = Linear(dim, projDim)
         self.modulation = (MLXRandom.normal([1, 2, dim]) * pow(Float(dim), -0.5)).asType(.float32)
     }
 
@@ -50,7 +51,7 @@ public class Head: Module {
             eVar = eVar.expandedDimensions(axis: 1)  // [B, 1, dim]
         }
         // Compute modulation in float32
-        let mod = modulation.expandedDimensions(axis: 1) + eVar.expandedDimensions(axis: 2)  // float32
+        let mod = modulation.expandedDimensions(axis: 1) + eVar.expandedDimensions(axis: 2)
         let e0 = mod[0..., 0..., 0, 0...]  // shift
         let e1 = mod[0..., 0..., 1, 0...]  // scale
         let xNorm = norm(x)
@@ -71,23 +72,23 @@ public class WanModel: Module {
     let textLen: Int
     let freqDim: Int
 
-    @ModuleInfo public var patchEmbeddingProj: Linear
-    @ModuleInfo public var textEmbedding0: Linear
+    let patchEmbeddingProj: Linear
+    let textEmbedding0: Linear
     let textEmbeddingAct: GELU
-    @ModuleInfo public var textEmbedding1: Linear
-    @ModuleInfo public var timeEmbedding0: Linear
+    let textEmbedding1: Linear
+    let timeEmbedding0: Linear
     let timeEmbeddingAct: SiLU
-    @ModuleInfo public var timeEmbedding1: Linear
+    let timeEmbedding1: Linear
     let timeProjectionAct: SiLU
-    @ModuleInfo public var timeProjection: Linear
-    @ModuleInfo public var blocks: [WanAttentionBlock]
-    @ModuleInfo public var head: Head
+    let timeProjection: Linear
+    let blocks: [WanAttentionBlock]
+    let head: Head
 
     /// Precomputed RoPE frequencies (non-parameter).
     public var freqs: MLXArray
 
     /// Precomputed sinusoidal inv_freq for time embedding.
-    var invFreq: MLXArray
+    let invFreq: MLXArray
 
     public init(config: WanModelConfig) {
         self.config = config
@@ -100,24 +101,24 @@ public class WanModel: Module {
 
         // Patch embedding: Conv3d implemented as reshaped linear
         let patchDim = config.inDim * config.patchSize.0 * config.patchSize.1 * config.patchSize.2
-        self._patchEmbeddingProj.wrappedValue = Linear(patchDim, config.dim)
+        self.patchEmbeddingProj = Linear(patchDim, config.dim)
 
         // Text embedding MLP
-        self._textEmbedding0.wrappedValue = Linear(config.textDim, config.dim)
+        self.textEmbedding0 = Linear(config.textDim, config.dim)
         self.textEmbeddingAct = GELU(approximation: .tanh)
-        self._textEmbedding1.wrappedValue = Linear(config.dim, config.dim)
+        self.textEmbedding1 = Linear(config.dim, config.dim)
 
         // Time embedding MLP
-        self._timeEmbedding0.wrappedValue = Linear(config.freqDim, config.dim)
+        self.timeEmbedding0 = Linear(config.freqDim, config.dim)
         self.timeEmbeddingAct = SiLU()
-        self._timeEmbedding1.wrappedValue = Linear(config.dim, config.dim)
+        self.timeEmbedding1 = Linear(config.dim, config.dim)
 
         // Time projection for modulation (6x dim)
         self.timeProjectionAct = SiLU()
-        self._timeProjection.wrappedValue = Linear(config.dim, config.dim * 6)
+        self.timeProjection = Linear(config.dim, config.dim * 6)
 
         // Transformer blocks
-        self._blocks.wrappedValue = (0..<config.numLayers).map { _ in
+        self.blocks = (0..<config.numLayers).map { _ in
             WanAttentionBlock(
                 dim: config.dim,
                 ffnDim: config.ffnDim,
@@ -130,7 +131,7 @@ public class WanModel: Module {
         }
 
         // Output head
-        self._head.wrappedValue = Head(
+        self.head = Head(
             dim: config.dim, outDim: config.outDim,
             patchSize: config.patchSize, eps: config.eps
         )
@@ -228,6 +229,9 @@ public class WanModel: Module {
 
     /// Pre-compute cross-attention K/V for all blocks.
     ///
+    /// Call once before the diffusion loop to cache K/V projections,
+    /// eliminating redundant computation at each denoising step.
+    ///
     /// - Parameter context: Pre-embedded text [B, textLen, dim]
     /// - Returns: List of (k, v) tuples, one per block
     public func prepareCrossKV(_ context: MLXArray) -> [(MLXArray, MLXArray)] {
@@ -237,6 +241,9 @@ public class WanModel: Module {
     // MARK: - RoPE Precompute
 
     /// Pre-compute RoPE cos/sin for constant grid sizes.
+    ///
+    /// Call once before the diffusion loop when grid sizes don't change
+    /// across steps. Eliminates per-step broadcast/concat overhead.
     ///
     /// - Parameter gridSizes: List of (F, H, W) tuples per batch element
     /// - Returns: (cosF, sinF) precomputed frequency tensors
@@ -251,7 +258,7 @@ public class WanModel: Module {
     ///
     /// - Parameters:
     ///   - xList: List of video latent tensors [C, F, H, W]
-    ///   - t: Timestep tensor [B]
+    ///   - t: Timestep tensor [B] or [B, L] for I2V
     ///   - context: Pre-embedded tensor from embedText() [B, textLen, dim]
     ///   - seqLen: Maximum sequence length for padding
     ///   - crossKVCaches: Optional list of (k, v) tuples from prepareCrossKV()
@@ -269,36 +276,26 @@ public class WanModel: Module {
     ) -> [MLXArray] {
         let batchSize = xList.count
 
-        // Detect identical inputs (CFG B=2)
-        let allSame = batchSize > 1 && xList.dropFirst().allSatisfy { $0.shape == xList[0].shape }
-            // Note: in Swift we can't do identity check on MLXArray easily, but shape check is a proxy
-
         // I2V: channel-concatenate conditioning y with noise x
         var xInput = xList
         if let yList = y {
             xInput = zip(xInput, yList).map { concatenated([$0, $1], axis: 0) }
         }
 
-        var x: MLXArray
-        var gridSizes: [(Int, Int, Int)]
-        var seqLensList: [Int]
-
         // Patchify
-        var patches = [(MLXArray, (Int, Int, Int))]()
         var patchArrays = [MLXArray]()
-        gridSizes = []
-        seqLensList = []
+        var gridSizes = [(Int, Int, Int)]()
+        var seqLensList = [Int]()
 
         for vid in xInput {
             let (p, gs) = patchify(vid)
-            patches.append((p, gs))
             patchArrays.append(p)
             gridSizes.append(gs)
             seqLensList.append(p.dim(1))
         }
 
         // Pad and concatenate
-        x = concatenated(
+        var x = concatenated(
             patchArrays.map { p in
                 if p.dim(1) < seqLen {
                     let padding = MLXArray.zeros([1, seqLen - p.dim(1), dim]).asType(p.dtype)
@@ -344,10 +341,10 @@ public class WanModel: Module {
             attnMask = MLXArray.zeros([batchSize, 1, 1, seqLen]).asType(wDtype)
             for (i, sl) in seqLensList.enumerated() {
                 if sl < seqLen {
-                    let maskSlice = MLXArray.full([1, 1, 1, seqLen - sl], values: MLXArray(-1e9)).asType(wDtype)
-                    let zeroSlice = MLXArray.zeros([1, 1, 1, sl]).asType(wDtype)
-                    let row = concatenated([zeroSlice, maskSlice], axis: 3)
-                    attnMask![i] = row[0]
+                    let maskSlice = MLXArray.full([1, 1, seqLen - sl], values: MLXArray(-1e9)).asType(wDtype)
+                    let zeroSlice = MLXArray.zeros([1, 1, sl]).asType(wDtype)
+                    let row = concatenated([zeroSlice, maskSlice], axis: 2)
+                    attnMask![i] = row
                 }
             }
         }
@@ -369,14 +366,14 @@ public class WanModel: Module {
             )
         }
 
-        // Output head
-        let e: MLXArray
+        // Output head: compute time embedding for head modulation
+        let eHead: MLXArray
         if tVar.ndim == 1 {
-            e = timeEmbedding1(timeEmbeddingAct(timeEmbedding0(sinEmb)))
+            eHead = timeEmbedding1(timeEmbeddingAct(timeEmbedding0(sinEmb)))
         } else {
-            e = timeEmbedding1(timeEmbeddingAct(timeEmbedding0(sinEmb)))
+            eHead = timeEmbedding1(timeEmbeddingAct(timeEmbedding0(sinEmb)))
         }
-        x = head(x, e: e)
+        x = head(x, e: eHead)
 
         // Unpatchify
         let outputs = unpatchify(x, gridSizes: gridSizes)

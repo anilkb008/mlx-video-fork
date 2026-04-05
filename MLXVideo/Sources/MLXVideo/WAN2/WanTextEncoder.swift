@@ -32,7 +32,7 @@ public class T5RelativeEmbedding: Module {
     let bidirectional: Bool
     let maxDist: Int
 
-    @ModuleInfo public var embedding: Embedding
+    let embedding: Embedding
 
     public init(
         numBuckets: Int,
@@ -44,7 +44,7 @@ public class T5RelativeEmbedding: Module {
         self.numHeads = numHeads
         self.bidirectional = bidirectional
         self.maxDist = maxDist
-        self._embedding.wrappedValue = Embedding(embeddingCount: numBuckets, dimensions: numHeads)
+        self.embedding = Embedding(embeddingCount: numBuckets, dimensions: numHeads)
     }
 
     private func relativePositionBucket(_ relPos: MLXArray) -> MLXArray {
@@ -57,17 +57,17 @@ public class T5RelativeEmbedding: Module {
             let isSmall = relPosAbs .< Int32(maxExact)
 
             let relPosF = relPosAbs.asType(.float32)
-            var relPosLarge = Float(maxExact) + (
+            let relPosLargeFloat = Float(maxExact) + (
                 MLX.log(relPosF / Float(maxExact))
                 / Foundation.log(Float(maxDist) / Float(maxExact))
                 * Float(numBucketsHalf - maxExact)
             )
-            relPosLarge = minimum(
-                relPosLarge.asType(.int32),
-                MLXArray.full(relPosLarge.shape, values: Int32(numBucketsHalf - 1))
-            ).asType(.int32)
+            let relPosLarge = minimum(
+                relPosLargeFloat.asType(.int32),
+                MLXArray.full(relPosLargeFloat.shape, values: MLXArray(Int32(numBucketsHalf - 1)), type: .int32)
+            )
 
-            return relBucketsBase + which(isSmall, relPosAbs.asType(.int32), relPosLarge.asType(.int32))
+            return relBucketsBase + which(isSmall, relPosAbs.asType(.int32), relPosLarge)
         } else {
             let relBuckets = MLXArray.zeros(like: relPos).asType(.int32)
             let relPosAbs = maximum(-relPos, MLXArray.zeros(like: relPos))
@@ -76,17 +76,17 @@ public class T5RelativeEmbedding: Module {
             let isSmall = relPosAbs .< Int32(maxExact)
 
             let relPosF = relPosAbs.asType(.float32)
-            var relPosLarge = Float(maxExact) + (
+            let relPosLargeFloat = Float(maxExact) + (
                 MLX.log(relPosF / Float(maxExact))
                 / Foundation.log(Float(maxDist) / Float(maxExact))
                 * Float(numBuckets - maxExact)
             )
-            relPosLarge = minimum(
-                relPosLarge.asType(.int32),
-                MLXArray.full(relPosLarge.shape, values: Int32(numBuckets - 1))
-            ).asType(.int32)
+            let relPosLarge = minimum(
+                relPosLargeFloat.asType(.int32),
+                MLXArray.full(relPosLargeFloat.shape, values: MLXArray(Int32(numBuckets - 1)), type: .int32)
+            )
 
-            return relBuckets + which(isSmall, relPosAbs.asType(.int32), relPosLarge.asType(.int32))
+            return relBuckets + which(isSmall, relPosAbs.asType(.int32), relPosLarge)
         }
     }
 
@@ -110,10 +110,10 @@ public class T5Attention: Module {
     let numHeads: Int
     let headDim: Int
 
-    @ModuleInfo public var q: Linear
-    @ModuleInfo public var k: Linear
-    @ModuleInfo public var v: Linear
-    @ModuleInfo public var o: Linear
+    let q: Linear
+    let k: Linear
+    let v: Linear
+    let o: Linear
 
     public init(dim: Int, dimAttn: Int, numHeads: Int) {
         precondition(dimAttn % numHeads == 0)
@@ -122,10 +122,10 @@ public class T5Attention: Module {
         self.numHeads = numHeads
         self.headDim = dimAttn / numHeads
 
-        self._q.wrappedValue = Linear(dim, dimAttn, bias: false)
-        self._k.wrappedValue = Linear(dim, dimAttn, bias: false)
-        self._v.wrappedValue = Linear(dim, dimAttn, bias: false)
-        self._o.wrappedValue = Linear(dimAttn, dim, bias: false)
+        self.q = Linear(dim, dimAttn, bias: false)
+        self.k = Linear(dim, dimAttn, bias: false)
+        self.v = Linear(dim, dimAttn, bias: false)
+        self.o = Linear(dimAttn, dim, bias: false)
     }
 
     public func callAsFunction(
@@ -179,16 +179,16 @@ public class T5Attention: Module {
 
 /// Gated feed-forward: gate(x) * fc1(x) -> fc2.
 public class T5FeedForward: Module {
-    @ModuleInfo public var gateProj: Linear
+    let gateProj: Linear
     let gateAct: GELU
-    @ModuleInfo public var fc1: Linear
-    @ModuleInfo public var fc2: Linear
+    let fc1: Linear
+    let fc2: Linear
 
     public init(dim: Int, dimFfn: Int) {
-        self._gateProj.wrappedValue = Linear(dim, dimFfn, bias: false)
+        self.gateProj = Linear(dim, dimFfn, bias: false)
         self.gateAct = GELU(approximation: .tanh)
-        self._fc1.wrappedValue = Linear(dim, dimFfn, bias: false)
-        self._fc2.wrappedValue = Linear(dimFfn, dim, bias: false)
+        self.fc1 = Linear(dim, dimFfn, bias: false)
+        self.fc2 = Linear(dimFfn, dim, bias: false)
     }
 
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
@@ -202,11 +202,11 @@ public class T5FeedForward: Module {
 public class T5SelfAttentionBlock: Module {
     let sharedPos: Bool
 
-    @ModuleInfo public var norm1: T5LayerNorm
-    @ModuleInfo public var attn: T5Attention
-    @ModuleInfo public var norm2: T5LayerNorm
-    @ModuleInfo public var ffn: T5FeedForward
-    @ModuleInfo public var posEmbedding: T5RelativeEmbedding?
+    let norm1: T5LayerNorm
+    let attn: T5Attention
+    let norm2: T5LayerNorm
+    let ffn: T5FeedForward
+    let posEmbedding: T5RelativeEmbedding?
 
     public init(
         dim: Int,
@@ -217,11 +217,11 @@ public class T5SelfAttentionBlock: Module {
         sharedPos: Bool = true
     ) {
         self.sharedPos = sharedPos
-        self._norm1.wrappedValue = T5LayerNorm(dim: dim)
-        self._attn.wrappedValue = T5Attention(dim: dim, dimAttn: dimAttn, numHeads: numHeads)
-        self._norm2.wrappedValue = T5LayerNorm(dim: dim)
-        self._ffn.wrappedValue = T5FeedForward(dim: dim, dimFfn: dimFfn)
-        self._posEmbedding.wrappedValue = sharedPos
+        self.norm1 = T5LayerNorm(dim: dim)
+        self.attn = T5Attention(dim: dim, dimAttn: dimAttn, numHeads: numHeads)
+        self.norm2 = T5LayerNorm(dim: dim)
+        self.ffn = T5FeedForward(dim: dim, dimFfn: dimFfn)
+        self.posEmbedding = sharedPos
             ? nil
             : T5RelativeEmbedding(numBuckets: numBuckets, numHeads: numHeads, bidirectional: true)
     }
@@ -249,10 +249,10 @@ public class T5SelfAttentionBlock: Module {
 public class T5Encoder: Module {
     public let dim: Int
 
-    @ModuleInfo public var tokenEmbedding: Embedding
-    @ModuleInfo public var posEmbedding: T5RelativeEmbedding?
-    @ModuleInfo public var blocks: [T5SelfAttentionBlock]
-    @ModuleInfo public var norm: T5LayerNorm
+    let tokenEmbedding: Embedding
+    let posEmbedding: T5RelativeEmbedding?
+    let blocks: [T5SelfAttentionBlock]
+    let norm: T5LayerNorm
 
     public init(
         vocabSize: Int = 256384,
@@ -266,17 +266,17 @@ public class T5Encoder: Module {
     ) {
         self.dim = dim
 
-        self._tokenEmbedding.wrappedValue = Embedding(embeddingCount: vocabSize, dimensions: dim)
-        self._posEmbedding.wrappedValue = sharedPos
+        self.tokenEmbedding = Embedding(embeddingCount: vocabSize, dimensions: dim)
+        self.posEmbedding = sharedPos
             ? T5RelativeEmbedding(numBuckets: numBuckets, numHeads: numHeads, bidirectional: true)
             : nil
-        self._blocks.wrappedValue = (0..<numLayers).map { _ in
+        self.blocks = (0..<numLayers).map { _ in
             T5SelfAttentionBlock(
                 dim: dim, dimAttn: dimAttn, dimFfn: dimFfn,
                 numHeads: numHeads, numBuckets: numBuckets, sharedPos: sharedPos
             )
         }
-        self._norm.wrappedValue = T5LayerNorm(dim: dim)
+        self.norm = T5LayerNorm(dim: dim)
     }
 
     /// Run T5 encoder.
