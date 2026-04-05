@@ -67,12 +67,12 @@ public class WanSelfAttention: Module {
     let windowSize: (Int, Int)
     let scale: Float
 
-    @ModuleInfo public var q: Linear
-    @ModuleInfo public var k: Linear
-    @ModuleInfo public var v: Linear
-    @ModuleInfo public var o: Linear
-    @ModuleInfo public var normQ: WanRMSNorm?
-    @ModuleInfo public var normK: WanRMSNorm?
+    let q: Linear
+    let k: Linear
+    let v: Linear
+    let o: Linear
+    let normQ: WanRMSNorm?
+    let normK: WanRMSNorm?
 
     public init(
         dim: Int,
@@ -88,13 +88,13 @@ public class WanSelfAttention: Module {
         self.windowSize = windowSize
         self.scale = pow(Float(headDim), -0.5)
 
-        self._q.wrappedValue = Linear(dim, dim)
-        self._k.wrappedValue = Linear(dim, dim)
-        self._v.wrappedValue = Linear(dim, dim)
-        self._o.wrappedValue = Linear(dim, dim)
+        self.q = Linear(dim, dim)
+        self.k = Linear(dim, dim)
+        self.v = Linear(dim, dim)
+        self.o = Linear(dim, dim)
 
-        self._normQ.wrappedValue = qkNorm ? WanRMSNorm(dim: dim, eps: eps) : nil
-        self._normK.wrappedValue = qkNorm ? WanRMSNorm(dim: dim, eps: eps) : nil
+        self.normQ = qkNorm ? WanRMSNorm(dim: dim, eps: eps) : nil
+        self.normK = qkNorm ? WanRMSNorm(dim: dim, eps: eps) : nil
     }
 
     public func callAsFunction(
@@ -125,42 +125,29 @@ public class WanSelfAttention: Module {
 
         var qArr = qProj.reshaped(b, s, n, d)
         var kArr = kProj.reshaped(b, s, n, d)
-        var vArr = v(xW).reshaped(b, s, n, d)
+        let vArr = v(xW).reshaped(b, s, n, d)
 
         // RoPE in float32 for precision
         qArr = ropeApply(qArr.asType(.float32), gridSizes: gridSizes, freqs: freqs, precomputedCosSin: ropeCosSin)
         kArr = ropeApply(kArr.asType(.float32), gridSizes: gridSizes, freqs: freqs, precomputedCosSin: ropeCosSin)
 
         // Cast back to weight dtype for efficient attention
-        qArr = qArr.asType(wDtype).transposed(0, 2, 1, 3)
-        kArr = kArr.asType(wDtype).transposed(0, 2, 1, 3)
-        vArr = vArr.transposed(0, 2, 1, 3)
+        let qFinal = qArr.asType(wDtype).transposed(0, 2, 1, 3)
+        let kFinal = kArr.asType(wDtype).transposed(0, 2, 1, 3)
+        let vFinal = vArr.transposed(0, 2, 1, 3)
 
-        // Use precomputed mask or build from seqLens
-        var mask = attnMask
-        if mask == nil && seqLens.contains(where: { $0 < s }) {
-            mask = MLXArray.zeros([b, 1, 1, s]).asType(qArr.dtype)
-            for (i, sl) in seqLens.enumerated() {
-                // Note: MLX Swift array mutation is limited; we build mask differently
-                if sl < s {
-                    let maskSlice = MLXArray.full([1, 1, 1, s - sl], values: MLXArray(-1e9)).asType(qArr.dtype)
-                    let zeroSlice = MLXArray.zeros([1, 1, 1, sl]).asType(qArr.dtype)
-                    let row = concatenated([zeroSlice, maskSlice], axis: 3)
-                    // For simplicity, rebuild full mask
-                    mask![i] = row[0]
-                }
-            }
-        }
+        // Use precomputed mask
+        let mask = attnMask
 
         // Memory-efficient scaled dot-product attention [B, N, L, D]
         let out: MLXArray
         if let m = mask {
             out = MLXFast.scaledDotProductAttention(
-                queries: qArr, keys: kArr, values: vArr, scale: scale, mask: m
+                queries: qFinal, keys: kFinal, values: vFinal, scale: scale, mask: m
             )
         } else {
             out = MLXFast.scaledDotProductAttention(
-                queries: qArr, keys: kArr, values: vArr, scale: scale
+                queries: qFinal, keys: kFinal, values: vFinal, scale: scale
             )
         }
 
@@ -177,12 +164,12 @@ public class WanCrossAttention: Module {
     let headDim: Int
     let scale: Float
 
-    @ModuleInfo public var q: Linear
-    @ModuleInfo public var k: Linear
-    @ModuleInfo public var v: Linear
-    @ModuleInfo public var o: Linear
-    @ModuleInfo public var normQ: WanRMSNorm?
-    @ModuleInfo public var normK: WanRMSNorm?
+    let q: Linear
+    let k: Linear
+    let v: Linear
+    let o: Linear
+    let normQ: WanRMSNorm?
+    let normK: WanRMSNorm?
 
     public init(
         dim: Int,
@@ -195,13 +182,13 @@ public class WanCrossAttention: Module {
         self.headDim = dim / numHeads
         self.scale = pow(Float(headDim), -0.5)
 
-        self._q.wrappedValue = Linear(dim, dim)
-        self._k.wrappedValue = Linear(dim, dim)
-        self._v.wrappedValue = Linear(dim, dim)
-        self._o.wrappedValue = Linear(dim, dim)
+        self.q = Linear(dim, dim)
+        self.k = Linear(dim, dim)
+        self.v = Linear(dim, dim)
+        self.o = Linear(dim, dim)
 
-        self._normQ.wrappedValue = qkNorm ? WanRMSNorm(dim: dim, eps: eps) : nil
-        self._normK.wrappedValue = qkNorm ? WanRMSNorm(dim: dim, eps: eps) : nil
+        self.normQ = qkNorm ? WanRMSNorm(dim: dim, eps: eps) : nil
+        self.normK = qkNorm ? WanRMSNorm(dim: dim, eps: eps) : nil
     }
 
     /// Pre-compute K and V projections for caching.
@@ -239,7 +226,7 @@ public class WanCrossAttention: Module {
         if let nq = normQ {
             qProj = nq(qProj)
         }
-        qProj = qProj.reshaped(b, -1, n, d).transposed(0, 2, 1, 3)
+        let qFinal = qProj.reshaped(b, -1, n, d).transposed(0, 2, 1, 3)
 
         let kArr: MLXArray
         let vArr: MLXArray
@@ -260,13 +247,15 @@ public class WanCrossAttention: Module {
         var mask: MLXArray? = nil
         if let cls = contextLens {
             let ctxLen = kArr.dim(2)
-            mask = MLXArray.zeros([b, 1, 1, ctxLen]).asType(qProj.dtype)
-            for (i, cl) in cls.enumerated() {
-                if cl < ctxLen {
-                    let maskSlice = MLXArray.full([1, 1, 1, ctxLen - cl], values: MLXArray(-1e9)).asType(qProj.dtype)
-                    let zeroSlice = MLXArray.zeros([1, 1, 1, cl]).asType(qProj.dtype)
-                    let row = concatenated([zeroSlice, maskSlice], axis: 3)
-                    mask![i] = row[0]
+            if cls.contains(where: { $0 < ctxLen }) {
+                mask = MLXArray.zeros([b, 1, 1, ctxLen]).asType(qFinal.dtype)
+                for (i, cl) in cls.enumerated() {
+                    if cl < ctxLen {
+                        let maskSlice = MLXArray.full([1, 1, ctxLen - cl], values: MLXArray(-1e9)).asType(qFinal.dtype)
+                        let zeroSlice = MLXArray.zeros([1, 1, cl]).asType(qFinal.dtype)
+                        let row = concatenated([zeroSlice, maskSlice], axis: 2)
+                        mask![i] = row
+                    }
                 }
             }
         }
@@ -274,11 +263,11 @@ public class WanCrossAttention: Module {
         let out: MLXArray
         if let m = mask {
             out = MLXFast.scaledDotProductAttention(
-                queries: qProj, keys: kArr, values: vArr, scale: scale, mask: m
+                queries: qFinal, keys: kArr, values: vArr, scale: scale, mask: m
             )
         } else {
             out = MLXFast.scaledDotProductAttention(
-                queries: qProj, keys: kArr, values: vArr, scale: scale
+                queries: qFinal, keys: kArr, values: vArr, scale: scale
             )
         }
 
